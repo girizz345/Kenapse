@@ -1,0 +1,27 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+backend/.env
+frontend/.env
+.env
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+backend/venv/
+venv/
+.venv/
+*.log
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── FAISS local index ─────────────────────────────────────────────────────────
+backend/faiss_index/
