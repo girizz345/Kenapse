@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import contextvars
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,6 +52,19 @@ class _TokenCounter:
             self.gemini_calls += 1
         else:
             self.groq_calls   += 1
+        # Also record against the current request's user (if set)
+        uid = _current_user_id.get()
+        if uid:
+            if uid not in _user_tokens:
+                _user_tokens[uid] = _TokenCounter()
+            uc = _user_tokens[uid]
+            uc.prompt_tokens     += prompt
+            uc.completion_tokens += completion
+            uc.calls             += 1
+            if provider == "gemini":
+                uc.gemini_calls += 1
+            else:
+                uc.groq_calls   += 1
 
     def to_dict(self) -> dict:
         total = self.prompt_tokens + self.completion_tokens
@@ -70,10 +84,33 @@ class _TokenCounter:
 
 _tokens = _TokenCounter()
 
+# Per-user counters (keyed by user_id, populated via contextvars per async request)
+_user_tokens: dict[str, _TokenCounter] = {}
+_current_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_user_id", default=None
+)
+
+
+def set_request_user(user_id: str | None) -> None:
+    """Call at the start of each request to attribute token usage to a user."""
+    _current_user_id.set(user_id)
+
 
 def get_token_usage() -> dict:
     """Return accumulated token stats since last server restart."""
     return _tokens.to_dict()
+
+
+def get_user_token_usage(user_id: str) -> dict:
+    """Return token stats for a specific user since last server restart."""
+    counter = _user_tokens.get(user_id)
+    if counter is None:
+        return {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "llm_calls": 0, "gemini_calls": 0, "groq_calls": 0,
+            "estimated_cost_usd": 0.0,
+        }
+    return counter.to_dict()
 
 
 async def _convert_to_steps(example_text: str, topic: str) -> list:

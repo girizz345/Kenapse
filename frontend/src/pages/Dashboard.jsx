@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   BookOpen, User, Settings, LogOut, Activity, Shield,
   Flame, Trophy, ArrowRight, Upload, File,
-  Brain, Sparkles, ChevronRight,
+  Brain, Sparkles, ChevronRight, Zap,
 } from 'lucide-react';
 import { generateCourse, getUserCourses } from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -57,6 +57,8 @@ const Dashboard = () => {
   const [isLoading,    setIsLoading]    = useState(false);
   const [stats,        setStats]        = useState({ courses: 0, avgScore: null, lastCourse: null });
   const [activeTab,    setActiveTab]    = useState('ai');
+  const [usageStats,   setUsageStats]   = useState(null);
+  const [usageLoading, setUsageLoading] = useState(false);
   const [file,         setFile]         = useState(null);
   const [isUploading,  setIsUploading]  = useState(false);
   const [uploadStatus, setUploadStatus] = useState('');
@@ -90,6 +92,22 @@ const Dashboard = () => {
       })
       .catch(console.error);
   }, [user?.id]);
+
+  // ── AI usage fetch ──────────────────────────────────────────────────────────
+  const fetchUsage = async () => {
+    setUsageLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const API_BASE = import.meta.env.VITE_API_URL || 'https://kenapse-production.up.railway.app';
+      const res = await fetch(`${API_BASE}/user/tokens`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) setUsageStats(await res.json());
+    } catch { /* non-critical */ } finally {
+      setUsageLoading(false);
+    }
+  };
 
   // ── Course generator ────────────────────────────────────────────────────────
   const handleGenerate = async (e) => {
@@ -493,12 +511,13 @@ const Dashboard = () => {
           }}>
             {[
               { id: 'ai',     label: 'AI Course Generator', icon: Sparkles },
-              { id: 'upload', label: 'Upload Material',     icon: Upload },
+              { id: 'upload', label: 'Upload Material',     icon: Upload   },
+              { id: 'usage',  label: 'My AI Usage',         icon: Zap      },
             ].map(tab => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
               return (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+                <button key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.id === 'usage') fetchUsage(); }} style={{
                   display: 'flex', alignItems: 'center', gap: '8px',
                   padding: '1.1rem 1rem', marginBottom: '-1px',
                   background: 'none', border: 'none', cursor: 'pointer',
@@ -629,6 +648,50 @@ const Dashboard = () => {
                   )}
                 </button>
               </form>
+            )}
+
+            {/* ── My AI Usage ── */}
+            {activeTab === 'usage' && (
+              <div>
+                <p style={{ fontSize: '1.05rem', color: '#64748b', marginBottom: '1.75rem', fontFamily: 'var(--font-body)', lineHeight: 1.7 }}>
+                  Your personal AI token usage since the server last started. Resets on each backend restart.
+                </p>
+                {usageLoading ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#64748b', fontFamily: 'var(--font-body)' }}>
+                    <span style={{ display: 'inline-block', width: '14px', height: '14px', border: '2px solid rgba(99,102,241,0.2)', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+                    Loading...
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '0.85rem' }}>
+                    {[
+                      { label: 'AI Calls',        value: (usageStats?.llm_calls ?? 0).toLocaleString(),        color: '#818cf8', sub: `${(usageStats?.gemini_calls ?? 0)} Gemini · ${(usageStats?.groq_calls ?? 0)} Groq` },
+                      { label: 'Tokens Used',     value: ((usageStats?.total_tokens ?? 0)).toLocaleString(),    color: '#34d399', sub: `${(usageStats?.prompt_tokens ?? 0).toLocaleString()} in · ${(usageStats?.completion_tokens ?? 0).toLocaleString()} out` },
+                      { label: 'Estimated Cost',  value: `$${(usageStats?.estimated_cost_usd ?? 0).toFixed(4)}`, color: '#fb923c', sub: 'Gemini + Groq blended' },
+                    ].map(stat => (
+                      <div key={stat.label} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '14px', padding: '1.25rem' }}>
+                        <p style={{ fontSize: '0.73rem', color: '#64748b', letterSpacing: '1.2px', fontFamily: 'var(--font-body)', marginBottom: '8px' }}>{stat.label.toUpperCase()}</p>
+                        <p style={{ fontSize: '1.6rem', fontWeight: 700, color: stat.color, fontFamily: 'var(--font-main)', letterSpacing: '1px', marginBottom: '5px' }}>{stat.value}</p>
+                        <p style={{ fontSize: '0.75rem', color: '#475569', fontFamily: 'var(--font-body)' }}>{stat.sub}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={fetchUsage}
+                  disabled={usageLoading}
+                  style={{
+                    marginTop: '1.25rem', display: 'flex', alignItems: 'center', gap: '7px',
+                    padding: '9px 16px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.08)',
+                    background: 'rgba(255,255,255,0.04)', color: '#64748b',
+                    fontFamily: 'var(--font-body)', fontSize: '0.9rem', cursor: 'pointer',
+                    transition: 'all 0.18s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#e2e8f0'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; e.currentTarget.style.color = '#64748b'; }}
+                >
+                  <Zap size={13} /> Refresh
+                </button>
+              </div>
             )}
 
             {/* ── Upload Material ── */}

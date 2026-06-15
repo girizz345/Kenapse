@@ -4,7 +4,7 @@ load_dotenv()
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import course, lesson, quiz, feedback, chat, export, materials, admin
+from app.routes import course, lesson, quiz, feedback, chat, export, materials, admin, user
 import logging
 
 # Configure logging
@@ -36,6 +36,7 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(export.router, prefix="/export", tags=["Export"])
 app.include_router(materials.router, prefix="/materials", tags=["Materials"])
 app.include_router(admin.router, prefix="/admin", tags=["Admin"])
+app.include_router(user.router,  prefix="/user",  tags=["User"])
 
 @app.get("/")
 def read_root():

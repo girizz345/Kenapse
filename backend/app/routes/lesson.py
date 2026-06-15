@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import LessonRequest, LessonResponse
-from app.services.llm_service import generate_lesson
+from app.services.llm_service import generate_lesson, set_request_user
 from app.core.supabase import get_supabase
 import logging
 
@@ -38,6 +38,7 @@ async def get_lesson(request: LessonRequest):
                 except Exception as e:
                     logger.warning(f"Could not fetch adaptation data for lesson: {e}")
 
+        set_request_user(request.user_id)
         lesson_data = await generate_lesson(
             request.chapter_id,
             request.topic,

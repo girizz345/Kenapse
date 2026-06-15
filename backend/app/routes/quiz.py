@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import QuizRequest, QuizResponse
-from app.services.llm_service import generate_quiz
+from app.services.llm_service import generate_quiz, set_request_user
 from app.core.supabase import get_supabase
 import logging
 
@@ -49,6 +49,7 @@ async def create_quiz(request: QuizRequest):
                 except Exception as e:
                     logger.warning(f"Could not fetch adaptation data for quiz: {e}")
 
+        set_request_user(request.user_id)
         quiz_data = await generate_quiz(
             topic=request.topic,
             level=effective_level,
