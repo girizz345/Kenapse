@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Users, BookOpen, Activity, RefreshCw, Shield,
-  UserCheck, UserX, Brain, LogOut, BarChart3,
+  UserCheck, UserX, Brain, LogOut, BarChart3, Zap,
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
@@ -269,6 +269,41 @@ function ContentTable({ content, loading }) {
   );
 }
 
+function TokenPanel({ tokens, loading }) {
+  if (loading) return <LoadingRow />;
+  if (!tokens) return <EmptyRow msg="No token data available. Make sure the backend is running." />;
+
+  const fmtNum = n => (n ?? 0).toLocaleString();
+  const fmtCost = n => `$${(n ?? 0).toFixed(4)}`;
+
+  const rows = [
+    { label: 'Total API Calls',      value: fmtNum(tokens.calls),             color: '#818cf8', desc: 'LLM calls since last server restart' },
+    { label: 'Gemini Calls',         value: fmtNum(tokens.gemini_calls),       color: '#34d399', desc: 'Calls handled by Gemini 2.0 Flash'    },
+    { label: 'Groq / Fallback Calls',value: fmtNum(tokens.groq_calls),         color: '#fcd34d', desc: 'Calls handled by Groq Llama fallback'  },
+    { label: 'Prompt Tokens',        value: fmtNum(tokens.prompt_tokens),      color: '#c084fc', desc: 'Total input tokens sent'               },
+    { label: 'Completion Tokens',    value: fmtNum(tokens.completion_tokens),  color: '#f9a8d4', desc: 'Total output tokens received'           },
+    { label: 'Total Tokens',         value: fmtNum((tokens.prompt_tokens ?? 0) + (tokens.completion_tokens ?? 0)), color: '#e879f9', desc: 'Combined token usage' },
+    { label: 'Estimated Cost (USD)', value: fmtCost(tokens.estimated_cost_usd), color: '#fb923c', desc: 'Gemini + Groq blended estimate'        },
+  ];
+
+  return (
+    <div style={{ padding: '2rem' }}>
+      <p style={{ fontSize: '0.8rem', color: '#475569', fontFamily: 'var(--font-body)', marginBottom: '1.5rem', letterSpacing: '0.5px' }}>
+        Usage resets on every server restart. These numbers reflect the current Railway process lifetime.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+        {rows.map(row => (
+          <div key={row.label} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '14px', padding: '1.5rem' }}>
+            <p style={{ fontSize: '0.73rem', color: '#64748b', fontFamily: 'var(--font-body)', letterSpacing: '1px', marginBottom: '8px' }}>{row.label.toUpperCase()}</p>
+            <p style={{ fontSize: '1.75rem', fontWeight: 700, color: row.color, fontFamily: 'var(--font-main)', letterSpacing: '1px', marginBottom: '6px' }}>{row.value}</p>
+            <p style={{ fontSize: '0.75rem', color: '#475569', fontFamily: 'var(--font-body)' }}>{row.desc}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LoadingRow() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '2rem', color: '#64748b', fontFamily: 'var(--font-body)', fontSize: '0.9rem' }}>
@@ -293,9 +328,25 @@ const AdminDashboard = () => {
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [tokens,     setTokens]     = useState(null);
+  const [tokenLoading, setTokenLoading] = useState(false);
 
   const displayName = user?.user_metadata?.name || user?.user_metadata?.full_name || 'Admin';
   const inits       = displayName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+
+  const fetchTokenStats = useCallback(async () => {
+    setTokenLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(`${API_BASE_URL}/admin/tokens`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) setTokens(await res.json());
+    } catch { /* non-critical */ } finally {
+      setTokenLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true); else setLoading(true);
@@ -311,14 +362,16 @@ const AdminDashboard = () => {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+    fetchTokenStats();
+  }, [fetchTokenStats]);
 
   useEffect(() => { load(); }, [load]);
 
   const TABS = [
-    { key: 'overview', label: 'Overview',      icon: BarChart3 },
-    { key: 'users',    label: 'Users',          icon: Users     },
-    { key: 'content',  label: 'Content',        icon: BookOpen  },
+    { key: 'overview', label: 'Overview', icon: BarChart3 },
+    { key: 'users',    label: 'Users',    icon: Users     },
+    { key: 'content',  label: 'Content',  icon: BookOpen  },
+    { key: 'tokens',   label: 'Tokens',   icon: Zap       },
   ];
 
   return (
@@ -446,6 +499,7 @@ const AdminDashboard = () => {
 
           {activeTab === 'users'   && <UsersTable   users={users}     loading={loading} onRoleChange={() => load(true)} />}
           {activeTab === 'content' && <ContentTable content={content} loading={loading} />}
+          {activeTab === 'tokens'  && <TokenPanel   tokens={tokens}   loading={tokenLoading} />}
         </div>
       </main>
     </div>

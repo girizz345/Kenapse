@@ -213,6 +213,13 @@ async def bootstrap_first_admin(request: AdminSetupRequest):
     return {"message": f"Success! {request.email} is now an admin. Sign in and go to /admin."}
 
 
+@router.get("/tokens")
+async def get_token_usage(_admin=Depends(require_admin)):
+    """Return LLM token consumption stats since the last server restart."""
+    from app.services.llm_service import get_token_usage
+    return get_token_usage()
+
+
 @router.patch("/users/{user_id}/role")
 async def update_user_role(user_id: str, request: RoleUpdateRequest, admin=Depends(require_admin)):
     """Promote or demote any user. Admins cannot demote themselves."""

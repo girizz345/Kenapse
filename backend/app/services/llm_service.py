@@ -34,6 +34,48 @@ if GROQ_API_KEY:
 _QUOTA_KEYWORDS = ("quota", "rate", "limit", "429", "resource exhausted", "too many", "overloaded")
 
 
+# ── Token usage tracker (in-process, resets on restart) ──────────────────────
+class _TokenCounter:
+    def __init__(self):
+        self.prompt_tokens     = 0
+        self.completion_tokens = 0
+        self.calls             = 0
+        self.gemini_calls      = 0
+        self.groq_calls        = 0
+
+    def record(self, prompt: int, completion: int, provider: str):
+        self.prompt_tokens     += prompt
+        self.completion_tokens += completion
+        self.calls             += 1
+        if provider == "gemini":
+            self.gemini_calls += 1
+        else:
+            self.groq_calls   += 1
+
+    def to_dict(self) -> dict:
+        total = self.prompt_tokens + self.completion_tokens
+        # Gemini 2.0 Flash pricing (per 1M tokens)
+        gemini_cost = (self.prompt_tokens * 0.075 + self.completion_tokens * 0.30) / 1_000_000
+        # Groq Llama-3.3-70B pricing (per 1M tokens)
+        groq_cost   = (self.prompt_tokens * 0.59  + self.completion_tokens * 0.79)  / 1_000_000
+        return {
+            "prompt_tokens":     self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens":      total,
+            "llm_calls":         self.calls,
+            "gemini_calls":      self.gemini_calls,
+            "groq_calls":        self.groq_calls,
+            "estimated_cost_usd": round(gemini_cost + groq_cost, 6),
+        }
+
+_tokens = _TokenCounter()
+
+
+def get_token_usage() -> dict:
+    """Return accumulated token stats since last server restart."""
+    return _tokens.to_dict()
+
+
 async def _convert_to_steps(example_text: str, topic: str) -> list:
     """Convert a prose example string into an example_steps array of typed objects."""
     prompt = f"""Convert this worked example into a JSON array of step objects.
@@ -91,6 +133,14 @@ def _call_gemini(prompt: str) -> str:
         model="gemini-2.0-flash",
         contents=prompt,
     )
+    # Track token usage
+    um = getattr(response, "usage_metadata", None)
+    if um:
+        _tokens.record(
+            getattr(um, "prompt_token_count", 0) or 0,
+            getattr(um, "candidates_token_count", 0) or 0,
+            "gemini",
+        )
     return response.text
 
 
@@ -103,6 +153,14 @@ def _call_groq(prompt: str) -> str:
         temperature=0.7,
         max_tokens=4096,
     )
+    # Track token usage
+    usage = getattr(response, "usage", None)
+    if usage:
+        _tokens.record(
+            getattr(usage, "prompt_tokens", 0) or 0,
+            getattr(usage, "completion_tokens", 0) or 0,
+            "groq",
+        )
     return response.choices[0].message.content
 
 

@@ -12,10 +12,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MAX_PDF_IMAGES   = 8        # images per material uploaded to storage
-MIN_IMAGE_BYTES  = 5_000    # skip images < 5 KB (icons / decorations)
-FULL_TEXT_LIMIT  = 500_000  # extract up to 500 K chars before sampling
-LLM_TEXT_TARGET  = 120_000  # chars sent to LLM for chapter generation
+MAX_PDF_IMAGES   = 8          # images per material uploaded to storage
+MIN_IMAGE_BYTES  = 5_000      # skip images < 5 KB (icons / decorations)
+FULL_TEXT_LIMIT  = 1_500_000  # extract up to 1.5 M chars (~300 pages)
+LLM_TEXT_TARGET  = 120_000    # chars per LLM chunk (≈ 30K tokens, safe for Gemini)
+LARGE_DOC_THRESHOLD = 300_000 # above this → use chunked chapter generation
 
 
 # ── PDF image extraction ──────────────────────────────────────────────────────
@@ -96,14 +97,14 @@ def _extract_headings(text: str) -> str:
 
 def _smart_sample(text: str, target: int = LLM_TEXT_TARGET) -> str:
     """
-    For documents longer than `target` chars, take proportional slices
-    spread evenly from start to end so every part of the book is
-    represented in the LLM prompt.
+    Proportional slice sampling — scales the number of slices with doc size
+    so large books get more coverage than small ones.
     """
     if len(text) <= target:
         return text
 
-    n_slices  = 20
+    # More slices for bigger docs: 20 baseline, up to 40 for very large books
+    n_slices  = min(40, max(20, len(text) // 30_000))
     slice_len = target // n_slices
     total     = len(text)
     step      = total // n_slices
@@ -115,10 +116,27 @@ def _smart_sample(text: str, target: int = LLM_TEXT_TARGET) -> str:
 
     sampled = "\n\n[...]\n\n".join(parts)
     logger.info(
-        f"Document too large ({len(text):,} chars) — sampled {len(sampled):,} chars "
-        f"across {n_slices} slices for LLM"
+        f"Sampled {len(sampled):,} chars across {n_slices} slices "
+        f"(doc: {len(text):,} chars)"
     )
     return sampled
+
+
+def _split_into_chunks(text: str, chunk_size: int = LLM_TEXT_TARGET) -> list[str]:
+    """
+    Split a large document into overlapping chunks for parallel processing.
+    Each chunk gets a small overlap with its neighbours to avoid cutting mid-topic.
+    """
+    overlap = chunk_size // 10   # 10% overlap
+    chunks  = []
+    start   = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = end - overlap
+    return chunks
 
 
 def _chapter_count_target(text_len: int) -> int:
@@ -261,85 +279,111 @@ async def process_study_material(file_url: str, file_name: str, user_id: str) ->
         except Exception as e:
             logger.warning(f"PDF image extraction failed (non-critical): {e}")
 
-    # 5. Build LLM input: headings skeleton + sampled body
+    # 5. Build chapter structure
     headings      = _extract_headings(full_text)
-    sampled_text  = _smart_sample(full_text)
     chapter_count = _chapter_count_target(text_len)
-
     headings_block = (
         f"\n\nDETECTED HEADINGS / TABLE OF CONTENTS:\n{headings}\n"
         if headings else ""
     )
 
-    chapter_prompt = f"""
-You are an expert curriculum designer. Your task is to create a COMPLETE and COMPREHENSIVE
-course structure for the study material below.
+    def _chapter_prompt(text_chunk: str, n_chapters: int, chunk_label: str = "") -> str:
+        label = f" ({chunk_label})" if chunk_label else ""
+        return f"""You are an expert curriculum designer. Create a course structure{label}.
 
-RULES — follow these exactly:
-1. Generate EXACTLY {chapter_count} chapters (or more if the material is richer).
-2. You MUST cover EVERY topic, section, and concept present in the material.
-3. Do NOT skip any subject area. The chapters must together cover 100% of the content.
-4. Chapter titles must reflect the ACTUAL content of the material, not generic names.
-5. Each chapter must list 2-4 specific topics drawn directly from the material.
-6. Each chapter must include a 150-250 word excerpt (content_text) taken verbatim or
-   closely paraphrased from the relevant section of the material.
+RULES:
+1. Generate EXACTLY {n_chapters} chapters covering the material below.
+2. Cover EVERY topic present — no skipping.
+3. Titles must reflect ACTUAL content, not generic names.
+4. Each chapter: 2-4 specific topics from the material.
+5. content_text: 150-250 word excerpt from the relevant section.
 {headings_block}
-MATERIAL TEXT (sampled proportionally from the full document):
-{sampled_text}
+MATERIAL:
+{text_chunk}
 
-Return ONLY valid JSON — no markdown fences, no extra keys:
+Return ONLY valid JSON array, no markdown:
 [
   {{
-    "title": "Chapter title matching the material",
-    "objective": "What the student will be able to do after this chapter",
-    "topics": ["specific topic A", "specific topic B", "specific topic C"],
-    "content_text": "150-250 word excerpt from the relevant section of the material..."
+    "title": "Chapter title",
+    "objective": "What the student will learn",
+    "topics": ["topic A", "topic B"],
+    "content_text": "150-250 word excerpt..."
   }}
-]
-"""
+]"""
 
-    try:
-        logger.info(f"Generating {chapter_count} chapters via LLM ({len(sampled_text):,} chars sent)…")
-        raw      = await asyncio.to_thread(generate_gemini_content, chapter_prompt)
-        chapters_list = json.loads(raw)
-        logger.info(f"LLM returned {len(chapters_list)} chapters")
-    except json.JSONDecodeError:
-        # Retry with a stricter prompt on parse failure
-        logger.warning("JSON parse failed — retrying with strict prompt")
-        strict_prompt = (
-            f"Return ONLY a JSON array of {chapter_count} chapter objects with keys "
-            f"title, objective, topics (array), content_text. "
-            f"Base it on this text:\n{sampled_text[:40_000]}"
-        )
+    async def _generate_chapters_for_chunk(chunk: str, n: int, label: str) -> list:
+        prompt = _chapter_prompt(chunk, n, label)
         try:
-            raw = await asyncio.to_thread(generate_gemini_content, strict_prompt)
-            chapters_list = json.loads(raw)
-        except Exception as e:
-            raise RuntimeError(f"Chapter generation failed twice: {e}")
-    except Exception as e:
-        raise RuntimeError(f"LLM chapter generation error: {e}")
+            raw = await asyncio.to_thread(generate_gemini_content, prompt)
+            result = json.loads(raw)
+            logger.info(f"Chunk '{label}': {len(result)} chapters generated")
+            return result
+        except json.JSONDecodeError:
+            logger.warning(f"JSON parse failed for chunk '{label}' — retrying")
+            retry = (
+                f"Return ONLY a JSON array of {n} chapter objects with keys "
+                f"title, objective, topics (array), content_text. "
+                f"Base it on:\n{chunk[:30_000]}"
+            )
+            try:
+                raw = await asyncio.to_thread(generate_gemini_content, retry)
+                return json.loads(raw)
+            except Exception as e:
+                logger.error(f"Chunk '{label}' failed twice: {e}")
+                return []
+
+    # Large doc → split into chunks and generate chapters in parallel
+    if text_len > LARGE_DOC_THRESHOLD:
+        chunks = _split_into_chunks(full_text, LLM_TEXT_TARGET)
+        n_per_chunk = max(3, chapter_count // len(chunks))
+        logger.info(
+            f"Large doc ({text_len:,} chars) → {len(chunks)} chunks × "
+            f"~{n_per_chunk} chapters each"
+        )
+        chunk_results = await asyncio.gather(*[
+            _generate_chapters_for_chunk(c, n_per_chunk, f"chunk {i+1}/{len(chunks)}")
+            for i, c in enumerate(chunks)
+        ])
+        # Merge, deduplicate by title
+        seen_titles: set[str] = set()
+        chapters_list: list = []
+        for batch in chunk_results:
+            for ch in batch:
+                t = ch.get("title", "").strip().lower()
+                if t and t not in seen_titles:
+                    seen_titles.add(t)
+                    chapters_list.append(ch)
+        logger.info(f"Merged {len(chapters_list)} unique chapters from all chunks")
+    else:
+        sampled_text = _smart_sample(full_text)
+        logger.info(f"Generating {chapter_count} chapters ({len(sampled_text):,} chars)…")
+        chapters_list = await _generate_chapters_for_chunk(
+            sampled_text, chapter_count, "single"
+        )
+
+    if not chapters_list:
+        raise RuntimeError("Chapter generation produced no results")
 
     # 6. Save chapters
-    for idx, chapter in enumerate(chapters_list):
-        chapter_id = str(uuid.uuid4())
-        title      = chapter.get("title", f"Chapter {idx + 1}")
-        topics     = chapter.get("topics", [])
+    saved_chapters: list[dict] = []   # keep (chapter_id, title, topics, content_text)
 
-        # Use LLM-provided excerpt; fall back to search in full text
+    for idx, chapter in enumerate(chapters_list):
+        chapter_id   = str(uuid.uuid4())
+        title        = chapter.get("title", f"Chapter {idx + 1}")
+        topics       = chapter.get("topics", [])
         content_text = chapter.get("content_text", "").strip()
         if not content_text:
             content_text = _find_chapter_excerpt(full_text, title, topics)
 
         chapter_data = {
-            "id":           chapter_id,
-            "material_id":  material_id,
-            "title":        title,
-            "objective":    chapter.get("objective", ""),
-            "topics":       topics,
-            "order_index":  idx,
-            "status":       "active" if idx == 0 else "locked",
+            "id":          chapter_id,
+            "material_id": material_id,
+            "title":       title,
+            "objective":   chapter.get("objective", ""),
+            "topics":      topics,
+            "order_index": idx,
+            "status":      "active" if idx == 0 else "locked",
         }
-        # content_text saved separately so missing column doesn't block insert
         try:
             supabase.table("chapters").insert(chapter_data).execute()
         except Exception as e:
@@ -351,40 +395,51 @@ Return ONLY valid JSON — no markdown fences, no extra keys:
                     {"content_text": content_text}
                 ).eq("id", chapter_id).execute()
             except Exception as e:
-                logger.warning(f"content_text save failed (run migrate_chapters_content.sql): {e}")
+                logger.warning(f"content_text save failed: {e}")
 
+        saved_chapters.append({
+            "id": chapter_id, "title": title,
+            "topics": topics, "content_text": content_text,
+        })
         logger.info(f"Chapter saved [{idx + 1}/{len(chapters_list)}]: {title}")
 
-        # 7. Generate quiz for this chapter
-        quiz_prompt = f"""
-Generate a 4-question multiple choice quiz for the chapter "{title}"
-covering: {', '.join(topics)}.
+    # 7. Generate ALL quizzes in parallel (major speed-up for large books)
+    async def _generate_and_save_quiz(ch: dict) -> None:
+        quiz_prompt = f"""Generate a 4-question multiple choice quiz for the chapter "{ch['title']}"
+covering: {', '.join(ch['topics'])}.
 
-Use the following excerpt from the material as the source of truth:
-{content_text[:1_500] if content_text else "No excerpt available — use general knowledge."}
+Use this excerpt as the source of truth:
+{ch['content_text'][:1_500] if ch['content_text'] else 'Use general knowledge.'}
 
 Return ONLY valid JSON:
 [
   {{
     "question": "Question text",
     "options": ["A", "B", "C", "D"],
-    "answer": "Exact text of the correct option",
-    "hint": "A subtle clue that guides thinking without revealing the answer"
+    "answer": "Exact text of correct option",
+    "hint": "A subtle clue without revealing the answer"
   }}
-]
-"""
+]"""
         try:
-            quiz_raw       = await asyncio.to_thread(generate_gemini_content, quiz_prompt)
-            quiz_questions = json.loads(quiz_raw)
+            raw       = await asyncio.to_thread(generate_gemini_content, quiz_prompt)
+            questions = json.loads(raw)
             supabase.table("quizzes").insert({
                 "id":         str(uuid.uuid4()),
-                "chapter_id": chapter_id,
-                "questions":  quiz_questions,
+                "chapter_id": ch["id"],
+                "questions":  questions,
             }).execute()
-            logger.info(f"Quiz saved for chapter: {title}")
+            logger.info(f"Quiz saved: {ch['title']}")
         except Exception as e:
-            logger.error(f"Quiz generation failed for '{title}': {e}")
-            # Non-critical — continue with next chapter
+            logger.error(f"Quiz failed for '{ch['title']}': {e}")
+
+    # Run all quiz generations concurrently — 5 at a time to avoid rate limits
+    semaphore = asyncio.Semaphore(5)
+
+    async def _quiz_with_limit(ch: dict) -> None:
+        async with semaphore:
+            await _generate_and_save_quiz(ch)
+
+    await asyncio.gather(*[_quiz_with_limit(ch) for ch in saved_chapters])
 
     logger.info(f"Processing complete: {material_id} ({len(chapters_list)} chapters)")
     return material_id
